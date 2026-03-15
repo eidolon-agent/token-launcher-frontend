@@ -6,11 +6,12 @@ export const config = createConfig({
   chains: [base],
   connectors: [
     injected(),
-    walletConnect({ projectId: '' }), // optional: add WalletConnect projectId if needed
+    walletConnect({ projectId: process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || '' }),
   ],
   transports: {
     [base.id]: http(process.env.NEXT_PUBLIC_RPC_URL || 'https://mainnet.base.org'),
   },
+  pollingInterval: 3000,
 });
 
 declare module 'wagmi' {

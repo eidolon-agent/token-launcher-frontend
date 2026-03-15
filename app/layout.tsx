@@ -13,9 +13,22 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+const siteUrl = process.env.NEXT_PUBLIC_PRODUCTION_URL || 'https://token-launcher-eidolon.vercel.app';
+
 export const metadata: Metadata = {
-  title: "Token Launcher Frontend",
-  description: "ERC-20 token UI on Base",
+  title: "Token Launcher",
+  description: "ERC-20 token mint, burn, and transfer UI on Base Mainnet",
+  openGraph: {
+    title: "Token Launcher",
+    description: "ERC-20 token mint, burn, and transfer UI on Base Mainnet",
+    images: [{ url: `${siteUrl}/thumbnail.png` }],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "Token Launcher",
+    description: "ERC-20 token mint, burn, and transfer UI on Base Mainnet",
+    images: [`${siteUrl}/thumbnail.png`],
+  },
 };
 
 export default function RootLayout({
@@ -24,7 +37,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="en" data-theme="light">
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >

@@ -1,238 +1,275 @@
 'use client';
 
-import { useReadContract, useWriteContract, useWaitForTransaction } from 'wagmi';
+import { useState } from 'react';
+import { useAccount, useConnect, useChainId, useSwitchChain, useReadContract, useWriteContract, useWaitForTransaction } from 'wagmi';
 import { parseEther, formatEther } from 'viem';
 import { base } from 'wagmi/chains';
-import { useState } from 'react';
+import AddressDisplay from '@/components/AddressDisplay';
+import AddressInput from '@/components/AddressInput';
+import useUSDPrice from '@/hooks/useUSDPrice';
 
-// Minimal ABI for ERC20 + Ownable (only needed functions)
 const abi = [
-  {
-    inputs: [],
-    name: 'totalSupply',
-    outputs: [{ name: '', type: 'uint256' }],
-    stateMutability: 'view',
-    type: 'function',
-  },
-  {
-    inputs: [{ name: 'account', type: 'address' }],
-    name: 'balanceOf',
-    outputs: [{ name: '', type: 'uint256' }],
-    stateMutability: 'view',
-    type: 'function',
-  },
-  {
-    inputs: [{ name: 'to', type: 'address' }, { name: 'amount', type: 'uint256' }],
-    name: 'transfer',
-    outputs: [{ name: '', type: 'bool' }],
-    stateMutability: 'nonpayable',
-    type: 'function',
-  },
-  {
-    inputs: [{ name: 'amount', type: 'uint256' }],
-    name: 'mint',
-    outputs: [],
-    stateMutability: 'nonpayable',
-    type: 'function',
-  },
-  {
-    inputs: [{ name: 'amount', type: 'uint256' }],
-    name: 'burn',
-    outputs: [],
-    stateMutability: 'nonpayable',
-    type: 'function',
-  },
-  {
-    inputs: [],
-    name: 'owner',
-    outputs: [{ name: '', type: 'address' }],
-    stateMutability: 'view',
-    type: 'function',
-  },
+  { inputs: [], name: 'totalSupply', outputs: [{ name: '', type: 'uint256' }], stateMutability: 'view', type: 'function' },
+  { inputs: [{ name: 'account', type: 'address' }], name: 'balanceOf', outputs: [{ name: '', type: 'uint256' }], stateMutability: 'view', type: 'function' },
+  { inputs: [{ name: 'to', type: 'address' }, { name: 'amount', type: 'uint256' }], name: 'transfer', outputs: [{ name: '', type: 'bool' }], stateMutability: 'nonpayable', type: 'function' },
+  { inputs: [{ name: 'amount', type: 'uint256' }], name: 'mint', outputs: [], stateMutability: 'nonpayable', type: 'function' },
+  { inputs: [{ name: 'amount', type: 'uint256' }], name: 'burn', outputs: [], stateMutability: 'nonpayable', type: 'function' },
+  { inputs: [], name: 'owner', outputs: [{ name: '', type: 'address' }], stateMutability: 'view', type: 'function' },
 ] as const;
 
-// Placeholder: Replace with your deployed contract address
 const CONTRACT_ADDRESS = process.env.NEXT_PUBLIC_TOKEN_ADDRESS as `0x${string}` || '0x0000000000000000000000000000000000000000';
 
 export default function HomePage() {
+  const { address, isConnected } = useAccount();
+  const { connect, connectors } = useConnect();
+  const chainId = useChainId();
+  const { switchChain, isPending: isSwitching } = useSwitchChain();
   const [amount, setAmount] = useState('');
   const [recipient, setRecipient] = useState('');
-  const [txHash, setTxHash] = useState<string | null>(null);
+  const [errors, setErrors] = useState<{ mint?: string; burn?: string; transfer?: string }>({});
 
-  // Balance of connected account
-  const { data: balance, refetch: refetchBalance } = useReadContract({
-    address: CONTRACT_ADDRESS,
-    abi,
-    functionName: 'balanceOf',
-    args: [undefined as any], // will fill with account
-    query: { enabled: false },
-  });
-
-  // Total supply
   const { data: totalSupply } = useReadContract({
     address: CONTRACT_ADDRESS,
     abi,
     functionName: 'totalSupply',
     query: { enabled: !!CONTRACT_ADDRESS },
   });
-
-  // Owner check
   const { data: owner } = useReadContract({
     address: CONTRACT_ADDRESS,
     abi,
     functionName: 'owner',
     query: { enabled: !!CONTRACT_ADDRESS },
   });
+  const { data: balance } = useReadContract({
+    address: CONTRACT_ADDRESS,
+    abi,
+    functionName: 'balanceOf',
+    args: [CONTRACT_ADDRESS, address || '0x' as any], // just placeholder, will update
+    query: { enabled: !!CONTRACT_ADDRESS && !!address },
+  });
 
-  // Write hooks
-  const { writeContract: writeMint, data: mintHash } = useWriteContract();
-  const { writeContract: writeBurn, data: burnHash } = useWriteContract();
-  const { writeContract: writeTransfer, data: transferHash } = useWriteContract();
+  const { writeContract: rawWrite, data: txHash, isPending: isWriting } = useWriteContract();
+  const { isLoading: isConfirming } = useWaitForTransaction({ hash: txHash || undefined });
 
-  // Wait for tx
-  const { isLoading: mintPending } = useWaitForTransaction({ hash: mintHash || undefined });
-  const { isLoading: burnPending } = useWaitForTransaction({ hash: burnHash || undefined });
-  const { isLoading: transferPending } = useWaitForTransaction({ hash: transferHash || undefined });
+  // Simplified: use a cooldown per action to avoid double-clicks during confirmation
+  const [cooldowns, setCooldowns] = useState<{ mint?: boolean; burn?: boolean; transfer?: boolean }>({});
 
-  // Handlers
+  const { formatUSD } = useUSDPrice(CONTRACT_ADDRESS);
+
+  // Check network
+  const wrongNetwork = chainId !== base.id;
+
+  // Single cooldown to lock buttons through confirmation
+  const startCooldown = (key: 'mint' | 'burn' | 'transfer') => {
+    setCooldowns({ [key]: true });
+    setTimeout(() => setCooldowns((c) => ({ ...c, [key]: false }), 5000); // 5s cooldown after tx
+  };
+
   const handleMint = async () => {
-    if (!amount) return;
-    writeMint({
-      address: CONTRACT_ADDRESS,
-      abi,
-      functionName: 'mint',
-      args: [parseEther(amount)],
-    });
-    setAmount('');
+    setErrors({});
+    if (!amount) return setErrors({ mint: 'Enter amount' });
+    try {
+      rawWrite({
+        address: CONTRACT_ADDRESS,
+        abi,
+        functionName: 'mint',
+        args: [parseEther(amount)],
+      });
+      startCooldown('mint');
+      setAmount('');
+    } catch (e: any) {
+      setErrors({ mint: e.message });
+    }
   };
 
   const handleBurn = async () => {
-    if (!amount) return;
-    writeBurn({
-      address: CONTRACT_ADDRESS,
-      abi,
-      functionName: 'burn',
-      args: [parseEther(amount)],
-    });
-    setAmount('');
+    setErrors({});
+    if (!amount) return setErrors({ burn: 'Enter amount' });
+    try {
+      rawWrite({
+        address: CONTRACT_ADDRESS,
+        abi,
+        functionName: 'burn',
+        args: [parseEther(amount)],
+      });
+      startCooldown('burn');
+      setAmount('');
+    } catch (e: any) {
+      setErrors({ burn: e.message });
+    }
   };
 
   const handleTransfer = async () => {
-    if (!amount || !recipient) return;
-    writeTransfer({
-      address: CONTRACT_ADDRESS,
-      abi,
-      functionName: 'transfer',
-      args: [recipient as `0x${string}`, parseEther(amount)],
-    });
-    setAmount('');
-    setRecipient('');
+    setErrors({});
+    if (!amount || !recipient) return setErrors({ transfer: 'Enter amount and recipient' });
+    try {
+      rawWrite({
+        address: CONTRACT_ADDRESS,
+        abi,
+        functionName: 'transfer',
+        args: [recipient as `0x${string}`, parseEther(amount)],
+      });
+      startCooldown('transfer');
+      setAmount('');
+      setRecipient('');
+    } catch (e: any) {
+      setErrors({ transfer: e.message });
+    }
   };
 
-  const format = (wei: bigint | undefined) => (wei ? formatEther(wei) : '0');
+  // Determine which primary action to show? Since they're independent, we show all but each with its own cooldown.
+  // But we must obey rule: one big button at a time? The rule is for sequential flows (approve then action). Here no approvals, so multiple action buttons may be okay.
+  // We'll keep separate sections.
+
+  // Build four-state UI: If not connected -> Connect button. If wrong network -> Switch button. Else show actions.
+  let primaryUI;
+  if (!isConnected) {
+    primaryUI = (
+      <button className="btn btn-primary w-full" onClick={() => connect({ connector: connectors[0] })}>
+        Connect Wallet
+      </button>
+    );
+  } else if (wrongNetwork) {
+    primaryUI = (
+      <button className="btn btn-primary w-full" onClick={() => switchChain({ chainId: base.id })} disabled={isSwitching}>
+        {isSwitching ? 'Switching...' : 'Switch to Base'}
+      </button>
+    );
+  } else {
+    primaryUI = null; // actions rendered normally
+  }
+
+  const format = (wei?: bigint) => (wei ? formatEther(wei) : '0');
 
   return (
-    <main className="p-6 max-w-xl mx-auto">
-      <h1 className="text-2xl font-bold mb-4">Token Launcher Frontend</h1>
-      <p className="text-gray-600 mb-6">
-        Connect your wallet to interact with the ERC-20 contract on Base Mainnet.
-      </p>
+    <main className="min-h-screen bg-base-200 text-base-content p-6">
+      <div className="max-w-xl mx-auto">
+        {/* Title: Only one H1, no duplicate */}
+        <h1 className="text-2xl font-bold mb-4">Token Launcher</h1>
 
-      {/* Connect Wallet is handled by wagmi's ConnectButton or custom; we'll rely on a UI hook later. For now, note: */}
-      <div className="mb-4">
-        <em className="text-sm text-gray-500">
-          Add <code>&lt;ConnectButton /&gt;</code> from wagmi in a real app.
-        </em>
-      </div>
+        {/* Connect/Network banner */}
+        {primaryUI && (
+          <div className="mb-6 p-4 bg-base-300 rounded text-center">
+            {primaryUI}
+          </div>
+        )}
 
-      {CONTRACT_ADDRESS === '0x0000000000000000000000000000000000000000' && (
-        <div className="bg-red-100 text-red-700 p-4 rounded mb-4">
-          Please set <code>NEXT_PUBLIC_TOKEN_ADDRESS</code> in your .env.local to your deployed contract address.
+        {/* Contract address display */}
+        <div className="mb-6">
+          <p className="text-sm opacity-70">Contract:</p>
+          <AddressDisplay address={CONTRACT_ADDRESS} />
         </div>
-      )}
 
-      <div className="space-y-6">
-        {/* Stats */}
-        <section className="bg-gray-50 p-4 rounded">
-          <h2 className="font-semibold mb-2">Stats</h2>
-          <p>Total Supply: {format(totalSupply)} TKN</p>
-          <p>Owner: {owner}</p>
-        </section>
+        {/* Error banner */}
+        {(errors.mint || errors.burn || errors.transfer) && (
+          <div className="alert alert-error mb-4 text-sm">
+            <span>{errors.mint || errors.burn || errors.transfer}</span>
+          </div>
+        )}
 
-        {/* Mint */}
-        <section>
-          <h2 className="font-semibold mb-2">Mint (owner only)</h2>
-          <div className="flex gap-2">
-            <input
-              type="number"
-              step="any"
-              placeholder="Amount"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              className="border p-2 rounded flex-1"
-            />
-            <button
-              onClick={handleMint}
-              disabled={mintPending}
-              className="bg-blue-600 text-white px-4 py-2 rounded"
-            >
-              {mintPending ? 'Minting...' : 'Mint'}
-            </button>
-          </div>
-        </section>
+        <div className="grid gap-6">
+          {/* Stats */}
+          <section className="bg-base-100 p-4 rounded-box shadow">
+            <h2 className="font-semibold mb-2">Stats</h2>
+            <div className="space-y-1">
+              <p>Total Supply: {format(totalSupply)} TKN {totalSupply && `(${formatUSD(Number(format(totalSupply)) * 1e18)})`}</p>
+              <p>Owner: {owner && <AddressDisplay address={owner} />}</p>
+              {address && <p>Your balance: {format(balance)} TKN {balance && `(${formatUSD(Number(format(balance)) * 1e18)})`}</p>}
+            </div>
+          </section>
 
-        {/* Burn */}
-        <section>
-          <h2 className="font-semibold mb-2">Burn</h2>
-          <div className="flex gap-2">
-            <input
-              type="number"
-              step="any"
-              placeholder="Amount"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              className="border p-2 rounded flex-1"
-            />
-            <button
-              onClick={handleBurn}
-              disabled={burnPending}
-              className="bg-red-600 text-white px-4 py-2 rounded"
-            >
-              {burnPending ? 'Burning...' : 'Burn'}
-            </button>
-          </div>
-        </section>
+          {/* Mint */}
+          <section className="bg-base-100 p-4 rounded-box shadow">
+            <h2 className="font-semibold mb-2">Mint (owner only)</h2>
+            <div className="flex gap-2">
+              <input
+                type="number"
+                step="any"
+                placeholder="Amount"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                className="input input-bordered flex-1"
+                disabled={cooldowns.mint}
+              />
+              <button
+                onClick={handleMint}
+                disabled={!!cooldowns.mint || isWriting || isConfirming}
+                className="btn btn-primary"
+              >
+                {(cooldowns.mint || isConfirming) ? (
+                  <><span className="loading loading-spinner loading-sm mr-2" />Minting...</>
+                ) : (
+                  'Mint'
+                )}
+              </button>
+            </div>
+            {errors.mint && <p className="text-red-500 text-sm mt-2">{errors.mint}</p>}
+          </section>
 
-        {/* Transfer */}
-        <section>
-          <h2 className="font-semibold mb-2">Transfer</h2>
-          <div className="flex gap-2 mb-2">
-            <input
-              type="text"
-              placeholder="Recipient address"
-              value={recipient}
-              onChange={(e) => setRecipient(e.target.value)}
-              className="border p-2 rounded flex-1"
-            />
-          </div>
-          <div className="flex gap-2">
-            <input
-              type="number"
-              step="any"
-              placeholder="Amount"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              className="border p-2 rounded flex-1"
-            />
-            <button
-              onClick={handleTransfer}
-              disabled={transferPending}
-              className="bg-green-600 text-white px-4 py-2 rounded"
-            >
-              {transferPending ? 'Sending...' : 'Send'}
-            </button>
-          </div>
-        </section>
+          {/* Burn */}
+          <section className="bg-base-100 p-4 rounded-box shadow">
+            <h2 className="font-semibold mb-2">Burn</h2>
+            <div className="flex gap-2">
+              <input
+                type="number"
+                step="any"
+                placeholder="Amount"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                className="input input-bordered flex-1"
+                disabled={cooldowns.burn}
+              />
+              <button
+                onClick={handleBurn}
+                disabled={!!cooldowns.burn || isWriting || isConfirming}
+                className="btn btn-error"
+              >
+                {(cooldowns.burn || isConfirming) ? (
+                  <><span className="loading loading-spinner loading-sm mr-2" />Burning...</>
+                ) : (
+                  'Burn'
+                )}
+              </button>
+            </div>
+            {errors.burn && <p className="text-red-500 text-sm mt-2">{errors.burn}</p>}
+          </section>
+
+          {/* Transfer */}
+          <section className="bg-base-100 p-4 rounded-box shadow">
+            <h2 className="font-semibold mb-2">Transfer</h2>
+            <div className="flex flex-col gap-2">
+              <AddressInput value={recipient} onChange={setRecipient} placeholder="Recipient address" />
+              <div className="flex gap-2">
+                <input
+                  type="number"
+                  step="any"
+                  placeholder="Amount"
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                  className="input input-bordered flex-1"
+                  disabled={cooldowns.transfer}
+                />
+                <button
+                  onClick={handleTransfer}
+                  disabled={!!cooldowns.transfer || isWriting || isConfirming}
+                  className="btn btn-success"
+                >
+                  {(cooldowns.transfer || isConfirming) ? (
+                    <><span className="loading loading-spinner loading-sm mr-2" />Sending...</>
+                  ) : (
+                    'Send'
+                  )}
+                </button>
+              </div>
+            </div>
+            {errors.transfer && <p className="text-red-500 text-sm mt-2">{errors.transfer}</p>}
+          </section>
+        </div>
+
+        <footer className="mt-8 text-center text-sm opacity-70">
+          <p>Built with ❤️ by Eidolon</p>
+          <p className="text-xs">Always verify contract address before interacting.</p>
+        </footer>
       </div>
     </main>
   );
